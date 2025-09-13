@@ -1,7 +1,7 @@
 gradio
-pandas
-reportlab
 transformers
+torch
+pandas
 pdfplumber
+reportlab
 Pillow
-tabulate
