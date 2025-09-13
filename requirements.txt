@@ -1,0 +1,7 @@
+gradio
+pandas
+reportlab
+transformers
+pdfplumber
+Pillow
+tabulate
