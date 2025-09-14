@@ -4,42 +4,24 @@ import ssl
 import smtplib
 import pandas as pd
 import pdfplumber
-import requests
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
+from transformers import pipeline
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from PIL import Image as PILImage
 import gradio as gr
 
 # ===========================
-# ✅ Hugging Face API Setup
+# ✅ Load LLM
 # ===========================
-HF_TOKEN = os.getenv("HF_TOKEN")
-HF_MODEL = "tiiuae/falcon-7b-instruct"  # Can switch to falcon-1b-instruct for lower latency
-HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
-HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
+generator = pipeline("text-generation", model="tiiuae/falcon-7b-instruct")
 
-def hf_generate(prompt, max_new_tokens=200, temperature=0.0):
-    """Call Hugging Face Inference API for text generation."""
-    payload = {
-        "inputs": prompt,
-        "parameters": {"max_new_tokens": max_new_tokens, "temperature": temperature}
-    }
-    try:
-        response = requests.post(HF_API_URL, headers=HF_HEADERS, json=payload, timeout=60)
-        response.raise_for_status()
-        result = response.json()
-        if isinstance(result, list) and "generated_text" in result[0]:
-            return result[0]["generated_text"]
-        return str(result)
-    except Exception as e:
-        return f"⚠️ LLM generation failed: {e}"
-
-LOGO_PATH = "logo drivool.png"
+LOGO_PATH = "logo drivool.png"  # make sure this file is in your repo root
 
 def header(canvas, doc):
     canvas.saveState()
@@ -52,7 +34,9 @@ def header(canvas, doc):
             pass
     canvas.restoreState()
 
+
 def clean_generation(raw_output, snippets_to_strip=None):
+    """Remove echoed prompt/context and extraneous instruction lines from LLM output."""
     text = raw_output or ""
     if snippets_to_strip:
         for s in snippets_to_strip:
@@ -66,7 +50,9 @@ def clean_generation(raw_output, snippets_to_strip=None):
         lines[0] = re.sub(r'^(Write|Based on).*?:\s*', '', lines[0], flags=re.IGNORECASE)
     return "\n".join(lines).strip()
 
+
 def split_into_bullets(text):
+    """Split LLM text into clean bullet points."""
     bullets = []
     for raw_line in text.split("\n"):
         raw_line = raw_line.strip()
@@ -79,37 +65,44 @@ def split_into_bullets(text):
                 bullets.append(part)
     return bullets
 
+
 def generate_llm_text(section, df):
-    """Generate a specific section using Hugging Face API and return cleaned text."""
+    """Generate a specific section using the LLM and return cleaned text."""
     base_context = f"Data shows {len(df)} incidents across {df['Project Code'].nunique()} sites and criteria counts: {df['Criteria'].value_counts().to_dict()}."
 
     if section == "overview":
         prompt = ("Write a short professional OVERVIEW paragraph (2-3 sentences) "
                   "summarizing the incident period. Respond ONLY with the paragraph.")
-        kwargs = dict(max_new_tokens=120, temperature=0.0)
+        gen_kwargs = dict(max_new_tokens=120, truncation=True, do_sample=False, temperature=0.0)
 
     elif section == "observations":
         prompt = ("Write exactly 3 key security observations as separate lines, each starting with '- '. "
                   "Keep each observation concise (one sentence). Respond ONLY with those 3 lines.")
-        kwargs = dict(max_new_tokens=160, temperature=0.0)
+        gen_kwargs = dict(max_new_tokens=160, truncation=True, do_sample=False, temperature=0.0)
 
     elif section == "recommendations":
         prompt = ("Write 4 recommendations. Each recommendation MUST start with '- ' on its own line. "
                   "If you include sub-points for a recommendation, put them on the next lines starting with '  • '. "
                   "Respond ONLY with the bullets and sub-bullets.")
-        kwargs = dict(max_new_tokens=220, temperature=0.0)
+        gen_kwargs = dict(max_new_tokens=220, truncation=True, do_sample=False, temperature=0.0)
 
     elif section == "conclusion":
         prompt = ("Write a short professional CONCLUSION paragraph (2-3 sentences) summarizing security posture "
                   "and next steps. Respond ONLY with the paragraph.")
-        kwargs = dict(max_new_tokens=100, temperature=0.0)
+        gen_kwargs = dict(max_new_tokens=100, truncation=True, do_sample=False, temperature=0.0)
 
     else:
         return ""
 
     full_prompt = base_context + "\n\n" + prompt
-    raw_resp = hf_generate(full_prompt, **kwargs)
-    return clean_generation(raw_resp, snippets_to_strip=[base_context, prompt, full_prompt])
+    raw_resp = generator(full_prompt, **gen_kwargs)
+    if isinstance(raw_resp, list):
+        raw_text = raw_resp[0].get("generated_text") or raw_resp[0].get("text") or str(raw_resp[0])
+    else:
+        raw_text = str(raw_resp)
+
+    return clean_generation(raw_text, snippets_to_strip=[base_context, prompt, full_prompt])
+
 
 def generate_debrief(file):
     try:
@@ -133,7 +126,7 @@ def generate_debrief(file):
             for _, row in group.iterrows():
                 site_points.append(f"&nbsp;&nbsp;&nbsp;• {row['Criteria']} ({row['Location / Place of Incident']})")
 
-        # Generate sections via HF API
+        # Generate sections via LLM
         overview_text = generate_llm_text("overview", df) or f"{len(df)} incidents across {df['Project Code'].nunique()} sites were reviewed this period."
         obs_bullets = split_into_bullets(generate_llm_text("observations", df)) or ["No key observations identified."]
         rec_bullets = split_into_bullets(generate_llm_text("recommendations", df)) or ["No recommendations provided."]
@@ -188,6 +181,7 @@ def generate_debrief(file):
     except Exception as e:
         return f"❌ Error generating debrief: {str(e)}", None
 
+
 def extract_text_from_pdf(pdf_path):
     text_content = ""
     with pdfplumber.open(pdf_path) as pdf:
@@ -196,6 +190,7 @@ def extract_text_from_pdf(pdf_path):
             if page_text:
                 text_content += page_text + "\n\n"
     return text_content.strip()
+
 
 def send_email_with_pdf(receiver_email, pdf_path, full_report_text):
     try:
@@ -241,6 +236,7 @@ def send_email_with_pdf(receiver_email, pdf_path, full_report_text):
     except Exception as e:
         return f"❌ Failed to send email: {e}"
 
+
 def gradio_app(file, email):
     result, pdf_path = generate_debrief(file)
     if not pdf_path:
@@ -253,6 +249,7 @@ def gradio_app(file, email):
 
     return (email_status or "✅ Report generated"), pdf_path
 
+
 with gr.Blocks() as demo:
     gr.Markdown("## 🛡️ Security Debrief Report Generator")
     with gr.Row():
@@ -264,6 +261,7 @@ with gr.Blocks() as demo:
     
     generate_btn.click(fn=gradio_app, inputs=[file_input, email_input], outputs=[output_msg, file_output])
 
+# Render uses PORT env var
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 8080)))
 
